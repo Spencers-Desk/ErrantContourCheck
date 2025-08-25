@@ -1,579 +1,384 @@
 from connect import get_current
+from config import debug
+import config
+import utils
 import matplotlib.pyplot as plt
 import tkinter as tk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from collections import Counter
 
-def calculate_contour_area(contour):
-    """
-    Calculate the area of a contour using the Shoelace formula.
-    
-    Args:
-        contour: A list of points with .x, .y, .z attributes (or dictionary access)
-    
-    Returns:
-        float: Area in square units (typically mm²)
-    """
-    # Impossible to have area > 0 with less than 3 points
-    if len(contour) < 3:
-        return 0.0
-    
-    # Extract x and y coordinates
-    x_coords = []
-    y_coords = []
-    
-    for point in contour:
-        # Handle both dictionary-style and attribute-style access
-        if hasattr(point, 'x'):
-            x_coords.append(point.x)
-            y_coords.append(point.y)
-        else:
-            x_coords.append(point['x'])
-            y_coords.append(point['y'])
-    
-    # Shoelace formula
-    n = len(x_coords)
-    area = 0.0
-    
-    for i in range(n):
-        j = (i + 1) % n  # Next vertex (wraps around to 0 for last vertex)
-        area += x_coords[i] * y_coords[j]
-        area -= x_coords[j] * y_coords[i]
-    
-    return abs(area) / 2.0
+# Import split_contour_by_external from utils
+from utils import split_contour_by_external
 
-# Outline
-## Check for gaps
-## Check for >1 contours on a single slice
+if debug: print("Script started")  # Top-level entry
 
-# Assumptions
-## Uniform slice thickness
-## true tumor shape is contiguous in all slice - cannot account for bilateral nodal chains for instance
+class PlanData:
+    def __init__(self):
+        self.patient = None
+        self.case = None
+        self.exam = None
 
-# 1. Grab the core RayStation objects
-patient = get_current("Patient")
-case    = get_current("Case")
-exam    = get_current("Examination")
+        self.roi_list = []
+        self.ptv_list = []
+        self.external = None
 
-# 2. Get available ROIs and create selection GUI
-def get_roi_selection():
-    """Create a GUI for selecting ROIs to analyze."""
+        self.slice_thickness = None
+
+        self.temp_rois = []
+
+        self.build()
+
+    def build(self):
+        """Build the plan data structure."""
+        self.patient = get_current("Patient")
+        self.case = get_current("Case")
+        self.exam = get_current("Examination")
+
+        self.roi_list = [roi for roi in self.case.PatientModel.RegionsOfInterest]
+        # Only include ROIs with Type == "Ptv"
+        self.ptv_list = [roi for roi in self.roi_list if getattr(roi, "Type", None) == "Ptv"]
+        # External ROI name (if available)
+        self.external = getattr(config, "ExternalName", None)
+
+class RoiData:
+    def __init__(self, roi, plan_data):
+        self.Name = roi.Name
+        self.contours = None
+        self.number_of_contours = 0
+        self.z_values = []
+        self.contour_areas = []
+        self.contours_per_slice = Counter()
+        self.gaps = 0
+        self.total_area = 0.0
+        self.avg_area = 0.0
+        self.min_area = 0.0
+        self.max_area = 0.0
+        self.build(roi, plan_data)
+
+    def build(self, roi, plan_data):
+        self.contours = getattr(plan_data.case.PatientModel.StructureSets[plan_data.exam.Name].RoiGeometries[roi.Name].PrimaryShape, "Contours", None)
+
+def get_roi_selection(plan_data):
+    if debug: print("Entering get_roi_selection")
     import tkinter as tk
     from tkinter import ttk, messagebox
     import time
-    
-    print("Starting ROI selection GUI...")
+
+    if debug: print("Starting ROI selection GUI...")
     start_time = time.time()
-    
-    # Get all ROIs from the case more efficiently (similar to api.py approach)
+
+    # Get viable PTVs for user to select
+    viable_rois = []
     try:
-        print("Getting ROI list...")
+        if debug: print("Getting ROI list...")
         roi_start = time.time()
-        
-        # Use the RegionsOfInterest approach like in api.py for better performance
-        all_rois = case.PatientModel.RegionsOfInterest
-        print(f"Found {len(all_rois)} total ROIs in {time.time() - roi_start:.2f}s")
-        
-        # Filter for Target type ROIs and those with contours
-        target_rois = []
-        external_rois = []
-        
-        print("Filtering ROIs and checking for contours...")
+        if debug: print(f"Found {len(plan_data.roi_list)} total ROIs in {time.time() - roi_start:.2f}s")
+        if debug: print("Filtering ROIs and checking for contours...")
         filter_start = time.time()
-        
-        for i, roi in enumerate(all_rois):
-            if i % 10 == 0:  # Progress indicator
-                print(f"  Processing ROI {i+1}/{len(all_rois)}: {roi.Name}")
-            
-            roi_name = roi.Name
-            roi_type = roi.Type
-            
-            # Check if ROI has contours more efficiently
-            # Skip the slow contour checking for now - just check if geometry exists
+        for i, roi in enumerate(plan_data.ptv_list):
+            if i % 10 == 0:
+                if debug: print(f"  Processing ROI {i+1}/{len(plan_data.ptv_list)}: {roi.Name}")
             try:
-                roi_geometry = case.PatientModel.StructureSets[exam.Name].RoiGeometries[roi_name]
-                # Just check if PrimaryShape exists, don't count contours yet
+                roi_geometry = plan_data.case.PatientModel.StructureSets[plan_data.exam.Name].RoiGeometries[roi.Name]
                 has_contours = (hasattr(roi_geometry, 'PrimaryShape') and 
                                roi_geometry.PrimaryShape is not None)
             except:
                 has_contours = False
-            
             if has_contours:
-                if roi_type == "External":
-                    external_rois.append(roi_name)
-                elif roi_type in ["Ptv", "Ctv", "Gtv", "Target"]:  # Common target types
-                    target_rois.append(roi_name)
-        
-        print(f"ROI filtering completed in {time.time() - filter_start:.2f}s")
-        print(f"Found {len(target_rois)} target ROIs, {len(external_rois)} external ROIs")
-        
-        # Sort the lists
-        target_rois.sort()
-        external_rois.sort()
-        
+                viable_rois.append(roi.Name)
+        if debug: print(f"ROI filtering completed in {time.time() - filter_start:.2f}s")
+        if debug: print(f"Found {len(viable_rois)} target ROIs")
+        viable_rois.sort()
     except Exception as e:
-        print(f"Error during ROI processing: {e}")
+        if debug: print(f"Error during ROI processing: {e}")
         messagebox.showerror("Error", f"Could not retrieve ROI list: {e}")
-        return None, None
-    
-    if not target_rois:
+        return None
+    if not viable_rois:
         messagebox.showwarning("No Target ROIs", "No Target-type ROIs with geometry found!")
-        return None, None
-    
-    print(f"Starting GUI creation after {time.time() - start_time:.2f}s total...")
+        return None
+    if debug: print(f"Starting GUI creation after {time.time() - start_time:.2f}s total...")
     gui_start = time.time()
-    
+
     # Create selection window
     root = tk.Tk()
     root.title("Select ROIs for Contour Analysis")
     root.geometry("500x400")
     root.resizable(False, False)
-    
+
     # Variables to store selections
     selected_rois = []
-    selected_external = tk.StringVar()
-    
+
     # Main frame
     main_frame = tk.Frame(root, padx=20, pady=20)
     main_frame.pack(fill=tk.BOTH, expand=True)
-    
+
     # Title
     title_label = tk.Label(main_frame, text="Multi-ROI Contour Analysis", 
                           font=('Arial', 16, 'bold'))
     title_label.pack(pady=(0, 20))
-    
+
     # Instructions
     instr_label = tk.Label(main_frame, 
                           text="Select 1-4 Target ROIs to analyze for errant contours:",
                           font=('Arial', 10))
     instr_label.pack(pady=(0, 15))
-    
+
     # ROI selection frame
     roi_frame = tk.LabelFrame(main_frame, text="Target ROIs", font=('Arial', 10, 'bold'))
     roi_frame.pack(fill=tk.X, pady=(0, 15))
-    
+
     # Create 4 Combobox widgets for ROI selection
     roi_vars = []
     roi_combos = []
-    
     for i in range(4):
         row_frame = tk.Frame(roi_frame)
         row_frame.pack(fill=tk.X, padx=10, pady=5)
-        
         label = tk.Label(row_frame, text=f"ROI {i+1}:", width=8, anchor='w')
         label.pack(side=tk.LEFT)
-        
         var = tk.StringVar()
         roi_vars.append(var)
-        
-        combo = ttk.Combobox(row_frame, textvariable=var, values=[""] + target_rois,
+        combo = ttk.Combobox(row_frame, textvariable=var, values=[""] + viable_rois,
                             state="readonly", width=40)
         combo.pack(side=tk.LEFT, padx=(10, 0))
         roi_combos.append(combo)
-    
-    # External ROI selection frame
-    ext_frame = tk.LabelFrame(main_frame, text="External ROI (for boundary checking)", 
-                             font=('Arial', 10, 'bold'))
-    ext_frame.pack(fill=tk.X, pady=(0, 20))
-    
-    ext_row_frame = tk.Frame(ext_frame)
-    ext_row_frame.pack(fill=tk.X, padx=10, pady=5)
-    
-    ext_label = tk.Label(ext_row_frame, text="External:", width=8, anchor='w')
-    ext_label.pack(side=tk.LEFT)
-    
-    # Pre-select "External" if available
-    default_external = "External" if "External" in external_rois else ""
-    if default_external:
-        selected_external.set(default_external)
-    
-    ext_combo = ttk.Combobox(ext_row_frame, textvariable=selected_external, 
-                            values=[""] + external_rois,
-                            state="readonly", width=40)
-    ext_combo.pack(side=tk.LEFT, padx=(10, 0))
-    
+
     # Button frame
     button_frame = tk.Frame(main_frame)
     button_frame.pack(fill=tk.X, pady=(10, 0))
-    
+
     def validate_and_proceed():
-        print("Validating selections...")
-        # Get selected ROIs (remove empty selections)
+        if debug: print("validate_and_proceed called")
+        if debug: print("Validating selections...")
         selected = [var.get() for var in roi_vars if var.get().strip()]
-        
         if not selected:
             messagebox.showerror("Error", "Please select at least one ROI!")
             return
-        
-        # Check for duplicates
         if len(selected) != len(set(selected)):
             messagebox.showerror("Error", "Please select different ROIs (no duplicates)!")
             return
-        
-        print(f"Selected ROIs: {selected}")
-        
-        # Now do the more expensive contour count check only for selected ROIs
-        print("Verifying selected ROIs have contours...")
-        valid_selections = []
-        for roi_name in selected:
-            try:
-                roi_geometry = case.PatientModel.StructureSets[exam.Name].RoiGeometries[roi_name]
-                if (hasattr(roi_geometry, 'PrimaryShape') and 
-                    roi_geometry.PrimaryShape is not None and
-                    hasattr(roi_geometry.PrimaryShape, 'Contours') and
-                    len(roi_geometry.PrimaryShape.Contours) > 0):
-                    valid_selections.append(roi_name)
-                    print(f"  {roi_name}: {len(roi_geometry.PrimaryShape.Contours)} contours")
-                else:
-                    print(f"  {roi_name}: No contours found!")
-            except Exception as e:
-                print(f"  {roi_name}: Error checking contours - {e}")
-        
-        if not valid_selections:
-            messagebox.showerror("Error", "None of the selected ROIs have contours!")
-            return
-        
-        if len(valid_selections) != len(selected):
-            missing = set(selected) - set(valid_selections)
-            messagebox.showwarning("Warning", 
-                f"These ROIs have no contours and will be skipped: {', '.join(missing)}")
-        
-        # Store selections
-        selected_rois.extend(valid_selections)
-        
-        # Close window
+        if debug: print(f"Selected ROIs: {selected}")
+        selected_rois.extend(selected)
+        if debug: print(f"Selected ROIs after validation: {selected_rois}")
+        if debug: print("Closing ROI selection window")
         root.quit()
         root.destroy()
-    
+
     def cancel_selection():
+        if debug: print("ROI selection cancelled")
         root.quit()
         root.destroy()
-    
+
     # Buttons
     tk.Button(button_frame, text="Cancel", command=cancel_selection,
               width=15, bg='lightcoral').pack(side=tk.RIGHT, padx=(10, 0))
-    
     tk.Button(button_frame, text="Analyze ROIs", command=validate_and_proceed,
               width=15, bg='lightgreen').pack(side=tk.RIGHT)
-    
+
     # Summary info
-    info_text = f"Available Target ROIs: {len(target_rois)}\n"
-    info_text += f"Available External ROIs: {len(external_rois)}"
-    
+    info_text = f"Available Target ROIs: {len(viable_rois)}\n"
     info_label = tk.Label(main_frame, text=info_text, font=('Arial', 9), 
                          fg='gray', justify=tk.LEFT)
     info_label.pack(side=tk.BOTTOM, anchor='w', pady=(10, 0))
-    
-    print(f"GUI creation completed in {time.time() - gui_start:.2f}s")
-    print(f"Total time to show GUI: {time.time() - start_time:.2f}s")
-    
+
+    if debug: print(f"GUI creation completed in {time.time() - gui_start:.2f}s")
+    if debug: print(f"Total time to show GUI: {time.time() - start_time:.2f}s")
+
     # Start the GUI
+    if debug: print("ROI selection GUI ready, starting mainloop")
     root.mainloop()
-    
+    if debug: print("ROI selection GUI closed")
+
+    final_rois = []
+
     # Return selections
     if selected_rois:
-        external_roi = selected_external.get() if selected_external.get() else "External"
-        return selected_rois, external_roi
+        if debug: print(f"Ensuring contour attribute exists for selected ROIs")
+        for roi in selected_rois:
+            new_roi_name = utils.ensure_roi_has_contours(plan_data, roi)
+            if new_roi_name is None:
+                final_rois.append(roi)
+            elif new_roi_name != roi:
+                final_rois.append(new_roi_name)
+            else:
+                final_rois.append(roi)
+        if debug: print(f"Returning selected_rois: {final_rois}")
+        return final_rois
     else:
-        return None, None
+        return None
 
-# Get user selections
-print("Opening ROI selection dialog...")
-roi_names, external_roi_name = get_roi_selection()
+def analysis(plan_data, roi_data):
+    if debug: print("Starting ROI analysis loop")
+    for roi_name, roi_obj in roi_data.items():
+        if debug: print(f"Processing ROI: {roi_name}")
+        try:
+            contours = roi_obj.contours
+            number_of_contours = len(contours) if contours else 0
+            if debug: print(f"  {number_of_contours} contours found")
 
-if roi_names is None:
-    print("No ROIs selected. Exiting.")
-    exit()
+            z_values = []
+            contour_areas = []
 
-print(f"Selected ROIs: {roi_names}")
-print(f"External ROI: {external_roi_name}")
+            for contour in contours or []:
+                z_values.append(round(contour[0]['z'], 2))
+                contour_areas.append(utils.calculate_contour_area(contour))
 
-# 3. Process each ROI and collect data
-roi_data = {}  # Dictionary to store data for each ROI
+            roi_obj.number_of_contours = number_of_contours
+            roi_obj.z_values = z_values
+            roi_obj.contour_areas = contour_areas
+            roi_obj.contours_per_slice = Counter(z_values)
 
-for roi_name in roi_names:
-    print(f"\nProcessing ROI: {roi_name}")
-    
-    # Get the geometric‐contour container for this ROI
+            if debug: print(f"Finished processing ROI: {roi_name}")
+        except Exception as e:
+            if debug: print(f"  Error processing {roi_name}: {e}")
+            continue
+
+    if debug: print("Finished ROI analysis loop")
+
+    if debug: print("Processing External ROI for boundary checking")
+    external_contours = {}
     try:
-        geom = case.PatientModel.\
-                 StructureSets[exam.Name].\
-                 RoiGeometries[roi_name]. \
-                 PrimaryShape
-        
-        contours = geom.Contours
-        # contours is a list of loops; each loop is itself a list of points with .X, .Y, .Z
-        
-        number_of_contours = len(contours)
-        print(f"  {number_of_contours} contours found")
-        
-        z_values = [None] * number_of_contours
-        contour_areas = [None] * number_of_contours
-        
-        for index, contour in enumerate(contours):
-            z_values[index] = round(contours[index][0]['z'], 2)
-            contour_areas[index] = calculate_contour_area(contour)
-        
-        # Store data for this ROI
-        roi_data[roi_name] = {
-            'contours': contours,
-            'number_of_contours': number_of_contours,
-            'z_values': z_values,
-            'contour_areas': contour_areas,
-            'contours_per_slice': Counter(z_values)
-        }
-        
+        if plan_data.external:
+            if debug: print(f"\nProcessing External ROI: {plan_data.external}")
+            external_geom = plan_data.case.PatientModel.\
+                    StructureSets[plan_data.exam.Name].\
+                    RoiGeometries[plan_data.external]. \
+                    PrimaryShape
+
+            external_contour_list = external_geom.Contours
+            if debug: print(f"  {len(external_contour_list)} external contours found")
+
+            target_z_values = set()
+            for roi_obj in roi_data.values():
+                target_z_values.update(roi_obj.z_values)
+
+            for contour in external_contour_list:
+                z_val = round(contour[0]['z'], 2)
+                if z_val in target_z_values:
+                    x_coords = []
+                    y_coords = []
+                    for point in contour:
+                        if hasattr(point, 'x'):
+                            x_coords.append(point.x)
+                            y_coords.append(-point.y)
+                        else:
+                            x_coords.append(point['x'])
+                            y_coords.append(-point['y'])
+                    if x_coords and y_coords:
+                        if z_val not in external_contours:
+                            external_contours[z_val] = []
+                        external_contours[z_val].append({
+                            'x_coords': x_coords,
+                            'y_coords': y_coords
+                        })
+            if debug: print(f"  External contours processed for {len(external_contours)} relevant z-slices")
     except Exception as e:
-        print(f"  Error processing {roi_name}: {e}")
-        continue
+        if debug: print(f"  Warning: Could not process External ROI '{plan_data.external}': {e}")
+        if debug: print("  Boundary checking will be disabled.")
 
-# Process External ROI for boundary checking
-external_contours = {}  # Dictionary to store external contours by z-slice
-try:
-    print(f"\nProcessing External ROI: {external_roi_name}")
-    external_geom = case.PatientModel.\
-             StructureSets[exam.Name].\
-             RoiGeometries[external_roi_name]. \
-             PrimaryShape
-    
-    external_contour_list = external_geom.Contours
-    print(f"  {len(external_contour_list)} external contours found")
-    
-    # Get all z-values from our target ROIs to know which external slices we need
-    target_z_values = set()
-    for roi_name, data in roi_data.items():
-        target_z_values.update(data['z_values'])
-    
-    # Process only external contours at z-levels we care about
-    for contour in external_contour_list:
-        z_val = round(contour[0]['z'], 2)
-        if z_val in target_z_values:
-            # Extract x, y coordinates for this external contour
-            x_coords = []
-            y_coords = []
-            for point in contour:
-                if hasattr(point, 'x'):
-                    x_coords.append(point.x)
-                    y_coords.append(-point.y)  # Flip y-coordinate to match RayStation orientation
-                else:
-                    x_coords.append(point['x'])
-                    y_coords.append(-point['y'])  # Flip y-coordinate to match RayStation orientation
-            
-            if x_coords and y_coords:
-                # Store external contour coordinates for this z-slice
-                if z_val not in external_contours:
-                    external_contours[z_val] = []
-                external_contours[z_val].append({
-                    'x_coords': x_coords,
-                    'y_coords': y_coords
-                })
-    
-    print(f"  External contours processed for {len(external_contours)} relevant z-slices")
-    
-except Exception as e:
-    print(f"  Warning: Could not process External ROI '{external_roi_name}': {e}")
-    print("  Boundary checking will be disabled.")
+    all_z_values = []
+    for roi_obj in roi_data.values():
+        all_z_values.extend(roi_obj.z_values)
 
-def point_in_polygon(x, y, polygon_x, polygon_y):
-    """
-    Check if a point is inside a polygon using ray casting algorithm.
-    Returns True if point is inside, False otherwise.
-    """
-    n = len(polygon_x)
-    inside = False
-    
-    p1x, p1y = polygon_x[0], polygon_y[0]
-    for i in range(1, n + 1):
-        p2x, p2y = polygon_x[i % n], polygon_y[i % n]
-        if y > min(p1y, p2y):
-            if y <= max(p1y, p2y):
-                if x <= max(p1x, p2x):
-                    if p1y != p2y:
-                        xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y) + p1x
-                    if p1x == p2x or x <= xinters:
-                        inside = not inside
-        p1x, p1y = p2x, p2y
-    
-    return inside
+    if not all_z_values:
+        print("No contours found in any ROI!")
+        exit()
 
-def contour_outside_external(contour_x, contour_y, external_contours_at_z):
-    """
-    Check if any part of a contour is outside all external contours at this z-level.
-    Returns True if contour has points outside external boundary.
-    """
-    if not external_contours_at_z:
-        return False  # No external contour to check against
-    
-    # Check several points along the contour (sample every few points for efficiency)
-    sample_indices = range(0, len(contour_x), max(1, len(contour_x) // 10))
-    
-    for i in sample_indices:
-        x, y = contour_x[i], contour_y[i]
-        inside_any_external = False
+    ordered_z_values = sorted(all_z_values)
+    z_differences = [round(a - b, 2) for a, b in zip(ordered_z_values[1:], ordered_z_values[:-1])]
+    slice_thickness = min([diff for diff in z_differences if diff != 0]) if z_differences else 0
+
+    print(f"\nGlobal Analysis:")
+    print(f"Slice thickness: {slice_thickness} mm")
+    print(f"Z-range: {min(all_z_values):.1f} to {max(all_z_values):.1f} mm")
+
+    for roi_name, roi_obj in roi_data.items():
+        if debug: print(f"\n{roi_name} Analysis:")
         
-        # Check if this point is inside any external contour
-        for ext_contour in external_contours_at_z:
-            if point_in_polygon(x, y, ext_contour['x_coords'], ext_contour['y_coords']):
-                inside_any_external = True
-                break
+        ordered_z = sorted(roi_obj.z_values)
+        unique_z = sorted(set(roi_obj.z_values))
+        z_diffs = [round(a - b, 2) for a, b in zip(ordered_z[1:], ordered_z[:-1])]
+        gaps = sum(diff > slice_thickness for diff in z_diffs)
         
-        # If this point is outside all external contours, the contour is problematic
-        if not inside_any_external:
-            return True
-    
-    return False
-
-def split_contour_by_external(contour_x, contour_y, external_contours_at_z):
-    """
-    Split a contour into segments that are inside vs outside the external boundary.
-    Returns a list of segments with 'inside' or 'outside' classification.
-    """
-    if not external_contours_at_z:
-        # No external contour, treat entire contour as inside
-        return [{'x_coords': contour_x, 'y_coords': contour_y, 'type': 'inside'}]
-    
-    segments = []
-    current_segment_x = []
-    current_segment_y = []
-    current_type = None
-    
-    for i in range(len(contour_x)):
-        x, y = contour_x[i], contour_y[i]
+        total_area = sum(roi_obj.contour_areas)
+        avg_area = total_area / len(roi_obj.contour_areas) if roi_obj.contour_areas else 0
+        min_area = min(roi_obj.contour_areas) if roi_obj.contour_areas else 0
+        max_area = max(roi_obj.contour_areas) if roi_obj.contour_areas else 0
         
-        # Check if this point is inside any external contour
-        inside_any_external = False
-        for ext_contour in external_contours_at_z:
-            if point_in_polygon(x, y, ext_contour['x_coords'], ext_contour['y_coords']):
-                inside_any_external = True
-                break
+        if debug: print(f"  Total contours: {roi_obj.number_of_contours}")
+        if debug: print(f"  Unique slices: {len(unique_z)}")
+        if debug: print(f"  Gaps found: {gaps}")
+        if debug: print(f"  Total area: {total_area:.2f} mm²")
+        if debug: print(f"  Average area: {avg_area:.2f} mm²")
+        if debug: print(f"  Min area: {min_area:.2f} mm²")
+        if debug: print(f"  Max area: {max_area:.2f} mm²")
         
-        point_type = 'inside' if inside_any_external else 'outside'
-        
-        # If this is the first point or type hasn't changed, add to current segment
-        if current_type is None or current_type == point_type:
-            current_segment_x.append(x)
-            current_segment_y.append(y)
-            current_type = point_type
-        else:
-            # Type changed, save current segment and start new one
-            if len(current_segment_x) > 1:  # Only save segments with multiple points
-                segments.append({
-                    'x_coords': current_segment_x[:],
-                    'y_coords': current_segment_y[:],
-                    'type': current_type
-                })
-            
-            # Start new segment with this point
-            current_segment_x = [x]
-            current_segment_y = [y]
-            current_type = point_type
-    
-    # Save final segment
-    if len(current_segment_x) > 1:
-        segments.append({
-            'x_coords': current_segment_x,
-            'y_coords': current_segment_y,
-            'type': current_type
-        })
-    
-    return segments if segments else [{'x_coords': contour_x, 'y_coords': contour_y, 'type': 'inside'}]
+        roi_obj.gaps = gaps
+        roi_obj.total_area = total_area
+        roi_obj.avg_area = avg_area
+        roi_obj.min_area = min_area
+        roi_obj.max_area = max_area
 
-# Calculate global z-range and slice thickness from all ROIs
-all_z_values = []
-for roi_name, data in roi_data.items():
-    all_z_values.extend(data['z_values'])
-
-if not all_z_values:
-    print("No contours found in any ROI!")
-    exit()
-
-# Sort z-values and calculate slice thickness
-ordered_z_values = sorted(all_z_values)
-z_differences = [round(a - b, 2) for a, b in zip(ordered_z_values[1:], ordered_z_values[:-1])]
-slice_thickness = min([diff for diff in z_differences if diff != 0])
-
-print(f"\nGlobal Analysis:")
-print(f"Slice thickness: {slice_thickness} mm")
-print(f"Z-range: {min(all_z_values):.1f} to {max(all_z_values):.1f} mm")
-
-# Print analysis for each ROI
-for roi_name, data in roi_data.items():
-    print(f"\n{roi_name} Analysis:")
-    
-    ordered_z = sorted(data['z_values'])
-    unique_z = sorted(set(data['z_values']))
-    z_diffs = [round(a - b, 2) for a, b in zip(ordered_z[1:], ordered_z[:-1])]
-    gaps = sum(diff > slice_thickness for diff in z_diffs)
-    
-    total_area = sum(data['contour_areas'])
-    avg_area = total_area / len(data['contour_areas']) if data['contour_areas'] else 0
-    min_area = min(data['contour_areas']) if data['contour_areas'] else 0
-    max_area = max(data['contour_areas']) if data['contour_areas'] else 0
-    
-    print(f"  Total contours: {data['number_of_contours']}")
-    print(f"  Unique slices: {len(unique_z)}")
-    print(f"  Gaps found: {gaps}")
-    print(f"  Total area: {total_area:.2f} mm²")
-    print(f"  Average area: {avg_area:.2f} mm²")
-    print(f"  Min area: {min_area:.2f} mm²")
-    print(f"  Max area: {max_area:.2f} mm²")
-    
-    # Store additional analysis
-    data.update({
-        'gaps': gaps,
-        'total_area': total_area,
-        'avg_area': avg_area,
-        'min_area': min_area,
-        'max_area': max_area
-    })
-
+    # Return external_contours and slice_thickness for GUI
+    return external_contours, slice_thickness, all_z_values
 
 # Create GUI with visualizations for multiple ROIs
-def create_gui():
+def create_gui(roi_data, external_contours, slice_thickness, all_z_values):
+    if debug: print("Entered create_gui")
+    if debug: print("Creating Tk root window")
     root = tk.Tk()
-    roi_names_str = ", ".join(roi_names)
+    roi_names_str = ", ".join(roi_data.keys())
+    if debug: print(f"Setting window title: Multi-ROI Contour Analysis - {roi_names_str}")
     root.title(f"Multi-ROI Contour Analysis - {roi_names_str}")
+    if debug: print("Setting window geometry")
     root.geometry("1600x1000")
     
-    # Filter roi_names to only include ROIs that have data
-    valid_roi_names = [roi for roi in roi_names if roi in roi_data]
+    # ADD THIS HANDLER TO ENSURE MAINLOOP EXITS ON WINDOW CLOSE
+    def on_window_close():
+        if debug: print("Window close event triggered")
+        root.quit()
+        root.destroy()
+    root.protocol("WM_DELETE_WINDOW", on_window_close)
+
+    if debug: print("Filtering valid_roi_names")
+    valid_roi_names = [roi for roi in roi_data.keys()]
     num_rois = len(valid_roi_names)
+    if debug: print(f"Number of valid ROIs: {num_rois}")
     
     if num_rois == 0:
-        print("No valid ROI data found!")
+        if debug: print("No valid ROI data found! Returning from create_gui")
         return
     
-    # Create figure with 3 rows of subplots (contours per slice, area distribution, slice viewer)
-    # Adjust subplot heights: row 1 normal, row 2 shorter (2/3 height), row 3 normal
+    if debug: print("Creating matplotlib figure")
     fig = plt.figure(figsize=(16, 10))
-    
-    # Define custom subplot grid with height ratios [1, 0.67, 1]
+    if debug: print("Creating gridspec for subplots")
     gs = fig.add_gridspec(3, num_rois, height_ratios=[1, 0.67, 1])
     
-    # Calculate global z-range for consistent y-axis
+    if debug: print("Calculating global z-range")
     min_z = min(all_z_values)
     max_z = max(all_z_values)
+    if debug: print(f"min_z={min_z}, max_z={max_z}")
     
-    # Create complete range of z-values at slice thickness intervals
+    if debug: print("Building expected_z_values")
     expected_z_values = []
     current_z = min_z
     while current_z <= max_z + slice_thickness/2:
         expected_z_values.append(round(current_z, 2))
         current_z += slice_thickness
+    if debug: print(f"expected_z_values: {expected_z_values}")
     
     y_positions = list(range(len(expected_z_values)))
     y_labels = [f"{z:.1f}" for z in expected_z_values]
     
-    # Track global issues
+    if debug: print("Initializing global issue flags")
     global_has_multiple_contours = False
     global_has_isolated_contours = False
     global_has_missing_contours = False
     global_has_external_violations = False
     
-    # Row 1: Contours per slice plots
+    if debug: print("Creating contour axes")
     contour_axes = []
     for roi_idx, roi_name in enumerate(valid_roi_names):
-        # Create subplot using gridspec (row 0, column roi_idx)
+        if debug: print(f"Creating subplot for contour axes: {roi_name}")
         ax = fig.add_subplot(gs[0, roi_idx])
         contour_axes.append(ax)
         
@@ -582,7 +387,7 @@ def create_gui():
         # Create counts array with 0 for missing slices
         counts = []
         for expected_z in expected_z_values:
-            counts.append(data['contours_per_slice'].get(expected_z, 0))
+            counts.append(data.contours_per_slice.get(expected_z, 0))
         
         # Create bars for this ROI (no gaps between bars)
         bars = ax.barh(y_positions, counts, height=1.0, 
@@ -652,14 +457,15 @@ def create_gui():
         ax.set_xlabel('# Contours')
     
     # Row 2: Area distribution plots (shorter height)
+    if debug: print("Creating area axes")
     area_axes = []
     for roi_idx, roi_name in enumerate(valid_roi_names):
-        # Create subplot using gridspec (row 1, column roi_idx) - this will be 2/3 height
+        if debug: print(f"Creating subplot for area axes: {roi_name}")
         ax = fig.add_subplot(gs[1, roi_idx])
         area_axes.append(ax)
         
         data = roi_data[roi_name]
-        contour_areas = data['contour_areas']
+        contour_areas = data.contour_areas
         
         if contour_areas:
             # Create histogram
@@ -694,8 +500,8 @@ def create_gui():
     # Align y-axes for area plots (bottom row) - find max frequency
     max_frequency = 0
     for roi_name in valid_roi_names:
-        if roi_name in roi_data and roi_data[roi_name]['contour_areas']:
-            areas = roi_data[roi_name]['contour_areas']
+        if roi_name in roi_data and roi_data[roi_name].contour_areas:
+            areas = roi_data[roi_name].contour_areas
             max_area = max(areas) if areas else 0
             # Simple frequency count for each bin
             for area in areas:
@@ -705,21 +511,22 @@ def create_gui():
     for ax in area_axes:
         ax.set_ylim(0, max_frequency + 1)
     
-    # Row 3: Interactive slice viewer plots
+    if debug: print("Creating slice axes")
     slice_axes = []
-    current_slice_indices = {}  # Track current slice for each ROI
-    prerendered_slices = {}  # Store pre-rendered slice data for fast switching
-    slice_artists = {}  # Store matplotlib artists for blitting
-    slice_backgrounds = {}  # Store axis backgrounds for blitting
+    current_slice_indices = {}
+    prerendered_slices = {}
+    slice_artists = {}
+    slice_backgrounds = {}
     
     for roi_idx, roi_name in enumerate(valid_roi_names):
-        # Create subplot using gridspec (row 2, column roi_idx)
+        if debug: print(f"Creating subplot for slice axes: {roi_name}")
         ax = fig.add_subplot(gs[2, roi_idx])
         slice_axes.append(ax)
         
         # Initialize to show the first slice (slice 1)
         data = roi_data[roi_name]
-        available_slices = sorted(data['contours_per_slice'].keys())
+        available_slices = sorted(data.contours_per_slice.keys())
+        if debug: print(f"Available slices for {roi_name}: {available_slices}")
         if available_slices:
             current_slice_indices[roi_name] = 0  # Start at first slice (slice 1)
         else:
@@ -738,10 +545,10 @@ def create_gui():
             contours_at_z = []
             contour_areas_at_z = []
             
-            for i, z_val in enumerate(data['z_values']):
+            for i, z_val in enumerate(data.z_values):
                 if abs(z_val - z_slice) < 0.01:  # Account for floating point precision
-                    contours_at_z.append(data['contours'][i])
-                    contour_areas_at_z.append(data['contour_areas'][i])
+                    contours_at_z.append(data.contours[i])
+                    contour_areas_at_z.append(data.contour_areas[i])
             
             # Pre-process contour coordinates and collect bounds
             processed_contours = []
@@ -921,6 +728,7 @@ def create_gui():
     
     # Function to update slice display (optimized hide/show approach)
     def update_slice_display(roi_name, slice_index):
+        if debug: print(f"update_slice_display called for {roi_name}, slice_index={slice_index}")
         artists = slice_artists[roi_name]
         ax = artists['ax']
         
@@ -945,21 +753,23 @@ def create_gui():
             # No data for this slice
             ax.set_title(f'{roi_name}\nNo Data', fontsize=9)
     
-    # Initialize all slice displays
+    if debug: print("Initializing all slice displays")
     for roi_name in valid_roi_names:
+        if debug: print(f"Initializing slice display for {roi_name}")
         update_slice_display(roi_name, current_slice_indices[roi_name])
     
-    # Initial canvas refresh to ensure proper rendering
+    if debug: print("Drawing initial canvas")
     fig.canvas.draw_idle()
     
-    # Mouse click handler for slice navigation with boundary checking
+    if debug: print("Setting up event handlers")
     def on_click(event):
+        if debug: print(f"on_click event: {event}")
         if event.inaxes in slice_axes:
             roi_idx = slice_axes.index(event.inaxes)
             roi_name = valid_roi_names[roi_idx]
             
             data = roi_data[roi_name]
-            available_slices = sorted(data['contours_per_slice'].keys())
+            available_slices = sorted(data.contours_per_slice.keys())
             if not available_slices:
                 return
             
@@ -984,12 +794,12 @@ def create_gui():
                     roi_idx = valid_roi_names.index(roi_name)
                     slice_axes[roi_idx].figure.canvas.draw_idle()
     
-    # Keyboard handler for slice navigation with boundary checking
     def on_key(event):
+        if debug: print(f"on_key event: {event}")
         if event.key in ['up', 'down', 'left', 'right']:
             # Apply to all ROIs simultaneously with boundary checking
             for roi_name in valid_roi_names:
-                available_slices = sorted(roi_data[roi_name]['contours_per_slice'].keys())
+                available_slices = sorted(roi_data[roi_name].contours_per_slice.keys())
                 if not available_slices:
                     continue
                 
@@ -1008,12 +818,13 @@ def create_gui():
             # Use draw_idle() for better performance
             fig.canvas.draw_idle()
     
-    # Connect event handlers (click and keyboard only)
     fig.canvas.mpl_connect('button_press_event', on_click)
     fig.canvas.mpl_connect('key_press_event', on_key)
     
+    if debug: print("Calling plt.tight_layout()")
     plt.tight_layout()
     
+    if debug: print("Creating scrollable frame")
     # Create a scrollable frame for the entire content
     # Main canvas for scrolling
     main_canvas = tk.Canvas(root)
@@ -1028,8 +839,10 @@ def create_gui():
     main_canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
     main_canvas.configure(yscrollcommand=scrollbar.set)
     
+    if debug: print("Setting up mouse wheel scrolling")
     # Add mouse wheel scrolling support
     def on_mousewheel(event):
+        if debug: print(f"on_mousewheel event: {event}")
         main_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
     
     # Bind mouse wheel to canvas (Windows)
@@ -1045,12 +858,14 @@ def create_gui():
     main_canvas.pack(side="left", fill="both", expand=True)
     scrollbar.pack(side="right", fill="y")
     
-    # Embed plot in the scrollable frame
+    if debug: print("Embedding matplotlib figure in scrollable frame")
     canvas = FigureCanvasTkAgg(fig, master=scrollable_frame)
     canvas.draw()
     
-    # Add error detection banner at the top if issues found
+    if debug: print("Checking for error detection banner")
     if global_has_multiple_contours or global_has_isolated_contours or global_has_missing_contours or global_has_external_violations:
+        if debug: print("Displaying error detection banner")
+        # Add error detection banner at the top if issues found
         error_text = "⚠️ Possible Errant Contours Detected"
         details = []
         if global_has_missing_contours:
@@ -1072,29 +887,27 @@ def create_gui():
                               font=('Arial', 12, 'bold'))
         error_label.pack(pady=5)
     
+    if debug: print("Packing canvas widget")
     canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(5, 5))
     
-    # Re-connect event handlers after canvas is embedded
+    if debug: print("Reconnecting event handlers after embedding canvas")
     canvas.mpl_connect('button_press_event', on_click)
     canvas.mpl_connect('key_press_event', on_key)
-    
-    # Make sure the matplotlib canvas can receive focus for keyboard events
     canvas.get_tk_widget().focus_set()
     
-    # Create statistics text frame at bottom with separate rows for each ROI
+    if debug: print("Creating statistics frame")
     stats_frame = tk.Frame(scrollable_frame, bg='wheat', relief=tk.RAISED, bd=2)
     stats_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=5)
-    
-    # Build statistics text with separate rows for each ROI
-    for roi_idx, roi_name in enumerate(roi_names):
+    for roi_idx, roi_name in enumerate(valid_roi_names):
         if roi_name in roi_data:
+            if debug: print(f"Adding stats for {roi_name}")
             data = roi_data[roi_name]
-            stats_text = f"{roi_name}: {data['number_of_contours']} contours | "
-            stats_text += f"{data['gaps']} gaps | "
-            stats_text += f"Total Area: {data['total_area']:.0f}mm² | "
-            stats_text += f"Avg Area: {data['avg_area']:.0f}mm² | "
-            stats_text += f"Min: {data['min_area']:.0f}mm² | "
-            stats_text += f"Max: {data['max_area']:.0f}mm²"
+            stats_text = f"{roi_name}: {data.number_of_contours} contours | "
+            stats_text += f"{data.gaps} gaps | "
+            stats_text += f"Total Area: {data.total_area:.0f}mm² | "
+            stats_text += f"Avg Area: {data.avg_area:.0f}mm² | "
+            stats_text += f"Min: {data.min_area:.0f}mm² | "
+            stats_text += f"Max: {data.max_area:.0f}mm²"
             
             stats_label = tk.Label(stats_frame, text=stats_text, bg='wheat', font=('Arial', 9))
             stats_label.pack(pady=2)
@@ -1110,7 +923,59 @@ def create_gui():
                        bg='wheat', font=('Arial', 8, 'italic'))
     nav_info.pack(pady=1)
     
+    if debug: print("About to start GUI mainloop")
     root.mainloop()
+    if debug: print("Exited GUI mainloop")
+    if debug: print("Exiting create_gui")
 
-# Launch GUI
-create_gui()
+def main():
+    plan_data = PlanData()
+    roi_data = {}
+    if debug: print("Opening ROI selection dialog...")
+    selected_rois = get_roi_selection(plan_data)
+    if debug: print(f"ROI selection returned: selected_rois={selected_rois}")
+
+    if not selected_rois:
+        if debug: print("No ROIs selected. Exiting.")
+        exit()
+
+    if debug: print(f"Selected ROIs: {selected_rois}")
+
+    for roi_name in selected_rois:
+        # Try to find ROI object in ptv_list, then roi_list, else create dummy
+        roi_obj = next((roi for roi in plan_data.ptv_list if roi.Name == roi_name), None)
+        if not roi_obj:
+            roi_obj = next((roi for roi in plan_data.roi_list if roi.Name == roi_name), None)
+        if not roi_obj:
+            # Create a dummy object with Name attribute for RoiData to fetch geometry
+            class DummyRoi:
+                pass
+            roi_obj = DummyRoi()
+            roi_obj.Name = roi_name
+        roi_data[roi_name] = RoiData(roi_obj, plan_data)
+
+    external_contours, slice_thickness, all_z_values = analysis(plan_data, roi_data)
+
+    create_gui(roi_data, external_contours, slice_thickness, all_z_values)
+
+main()
+
+# # Launch GUI
+# if debug: print("Launching GUI")
+# create_gui()
+# if debug: print("GUI closed, proceeding to ROI deletion")
+
+# # Delete temporary ROIs created for contour conversion
+# if debug: print("Checking for temporary ROIs to delete")
+# if temp_rois_to_delete:
+#     if debug: print(f"\nDeleting temporary contour ROIs: {temp_rois_to_delete}")
+#     for temp_roi in temp_rois_to_delete:
+#         if debug: print(f"Attempting to delete temporary ROI: {temp_roi}")
+#         try:
+#             case.PatientModel.RegionsOfInterest[temp_roi].DeleteRoi()
+#             if debug: print(f"  Deleted temporary ROI: {temp_roi}")
+#         except Exception as e:
+#             if debug: print(f"  Failed to delete temporary ROI '{temp_roi}': {e}")
+# else:
+#     if debug: print("No temporary ROIs to delete")
+# if debug: print("Script finished")
