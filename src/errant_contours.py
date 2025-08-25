@@ -959,23 +959,3 @@ def main():
     create_gui(roi_data, external_contours, slice_thickness, all_z_values)
 
 main()
-
-# # Launch GUI
-# if debug: print("Launching GUI")
-# create_gui()
-# if debug: print("GUI closed, proceeding to ROI deletion")
-
-# # Delete temporary ROIs created for contour conversion
-# if debug: print("Checking for temporary ROIs to delete")
-# if temp_rois_to_delete:
-#     if debug: print(f"\nDeleting temporary contour ROIs: {temp_rois_to_delete}")
-#     for temp_roi in temp_rois_to_delete:
-#         if debug: print(f"Attempting to delete temporary ROI: {temp_roi}")
-#         try:
-#             case.PatientModel.RegionsOfInterest[temp_roi].DeleteRoi()
-#             if debug: print(f"  Deleted temporary ROI: {temp_roi}")
-#         except Exception as e:
-#             if debug: print(f"  Failed to delete temporary ROI '{temp_roi}': {e}")
-# else:
-#     if debug: print("No temporary ROIs to delete")
-# if debug: print("Script finished")
