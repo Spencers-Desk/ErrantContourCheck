@@ -301,9 +301,26 @@ def analysis(plan_data, roi_data):
         
         ordered_z = sorted(roi_obj.z_values)
         unique_z = sorted(set(roi_obj.z_values))
-        z_diffs = [round(a - b, 2) for a, b in zip(ordered_z[1:], ordered_z[:-1])]
-        gaps = sum(diff > slice_thickness for diff in z_diffs)
-        
+        # --- Updated gap detection logic ---
+        # Build expected z values between min and max, using slice_thickness
+        if ordered_z and slice_thickness > 0:
+            min_z = ordered_z[0]
+            max_z = ordered_z[-1]
+            expected_z = []
+            z = min_z
+            while z <= max_z + slice_thickness/2:
+                expected_z.append(round(z, 2))
+                z += slice_thickness
+            # Only count missing slices between first and last contour
+            missing_internal = [
+                z for z in expected_z[1:-1]  # exclude first and last
+                if z not in unique_z
+            ]
+            gaps = len(missing_internal)
+        else:
+            gaps = 0
+        # --- End update ---
+
         total_area = sum(roi_obj.contour_areas)
         avg_area = total_area / len(roi_obj.contour_areas) if roi_obj.contour_areas else 0
         min_area = min(roi_obj.contour_areas) if roi_obj.contour_areas else 0
