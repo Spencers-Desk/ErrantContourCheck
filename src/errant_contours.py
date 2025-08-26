@@ -843,9 +843,7 @@ def create_gui(roi_data, external_contours, slice_thickness, all_z_values):
     fig.canvas.mpl_connect('key_press_event', on_key)
     
     if debug: print("Calling plt.tight_layout()")
-    plt.tight_layout()
     
-    if debug: print("Creating scrollable frame")
     # Create a scrollable frame for the entire content
     # Main canvas for scrolling
     main_canvas = tk.Canvas(root)
@@ -883,28 +881,66 @@ def create_gui(roi_data, external_contours, slice_thickness, all_z_values):
     canvas = FigureCanvasTkAgg(fig, master=scrollable_frame)
     canvas.draw()
     
-    if debug: print("Checking for error detection banner")
-    # Error detection banner
-    if global_has_multiple_contours or global_has_isolated_contours or global_has_missing_contours or global_has_external_violations:
-        if debug: print("Displaying error detection banner")
-        # Add error detection banner at the top if issues found
-        error_text = "⚠️ Possible Errant Contours Detected"
-        details = []
-        if global_has_missing_contours:
-            details.append("Gaps found")
-        if global_has_isolated_contours:
-            details.append("Isolated contours (orange)")
-        if global_has_multiple_contours:
-            details.append("Multiple contours per slice (red)")
-        if global_has_external_violations:
-            details.append("Contours outside External (red)")
-        if details:
-            error_text += f" ({', '.join(details)})"
-        error_frame = tk.Frame(scrollable_frame, bg=config.error_banner_color, relief=tk.RAISED, bd=2)
-        error_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(5, 5))
-        error_label = tk.Label(error_frame, text=error_text, bg=config.error_banner_color, fg=config.error_banner_fg, 
-                              font=config.font_error_banner)
-        error_label.pack(pady=5)
+    # Prepare per-ROI issue flags and details
+    roi_issue_info = {}
+    for roi_idx, roi_name in enumerate(valid_roi_names):
+        data = roi_data[roi_name]
+        counts = []
+        for expected_z in expected_z_values:
+            counts.append(data.contours_per_slice.get(expected_z, 0))
+        # Isolated contours
+        isolation_threshold = 2 * slice_thickness
+        isolated_slices = set()
+        for i, z in enumerate(expected_z_values):
+            if counts[i] > 0:
+                min_distance_to_neighbor = float('inf')
+                for j, other_z in enumerate(expected_z_values):
+                    if i != j and counts[j] > 0:
+                        distance = abs(z - other_z)
+                        min_distance_to_neighbor = min(min_distance_to_neighbor, distance)
+                if min_distance_to_neighbor > isolation_threshold:
+                    isolated_slices.add(z)
+        has_multiple_contours = any(c > 1 for c in counts)
+        has_isolated_contours = len(isolated_slices) > 0
+        has_missing_contours = any(c == 0 for c in counts)
+        # External violations: check prerendered_slices for this ROI
+        external_violations = False
+        for slice_idx in range(len(data.contours_per_slice)):
+            prerendered = prerendered_slices.get(roi_name, {}).get(slice_idx, {})
+            for contour in prerendered.get('contours', []):
+                if contour.get('outside_external', False) and not contour.get('is_external', False):
+                    external_violations = True
+                    break
+            if external_violations:
+                break
+        roi_issue_info[roi_name] = {
+            'has_multiple_contours': has_multiple_contours,
+            'has_isolated_contours': has_isolated_contours,
+            'has_missing_contours': has_missing_contours,
+            'has_external_violations': external_violations
+        }
+
+    # For each ROI, create its own error detection banner above its plots
+    for roi_idx, roi_name in enumerate(valid_roi_names):
+        issues = roi_issue_info[roi_name]
+        if issues['has_multiple_contours'] or issues['has_isolated_contours'] or issues['has_missing_contours'] or issues['has_external_violations']:
+            error_text = f"⚠️ {roi_name}: Possible Errant Contours Detected"
+            details = []
+            if issues['has_missing_contours']:
+                details.append("Gaps found")
+            if issues['has_isolated_contours']:
+                details.append("Isolated contours (orange)")
+            if issues['has_multiple_contours']:
+                details.append("Multiple contours per slice (red)")
+            if issues['has_external_violations']:
+                details.append("Contours outside External (red)")
+            if details:
+                error_text += f" ({', '.join(details)})"
+            error_frame = tk.Frame(scrollable_frame, bg=config.error_banner_color, relief=tk.RAISED, bd=2)
+            error_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(5, 5))
+            error_label = tk.Label(error_frame, text=error_text, bg=config.error_banner_color, fg=config.error_banner_fg, 
+                                  font=config.font_error_banner)
+            error_label.pack(pady=5)
 
     if debug: print("Packing canvas widget")
     canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(5, 5))
