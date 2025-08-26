@@ -235,51 +235,6 @@ def analysis(plan_data, roi_data):
 
     if debug: print("Finished ROI analysis loop")
 
-    if debug: print("Processing External ROI for boundary checking")
-    external_contours = {}
-    try:
-        external_roi_name = plan_data.external
-        if not external_roi_name or external_roi_name not in [roi.Name for roi in plan_data.roi_list]:
-            print(f"WARNING: External ROI '{external_roi_name}' not found in case. External contours will not be shown.")
-        else:
-            if debug: print(f"\nProcessing External ROI: {external_roi_name}")
-            external_geom = plan_data.case.PatientModel.\
-                    StructureSets[plan_data.exam.Name].\
-                    RoiGeometries[external_roi_name]. \
-                    PrimaryShape
-
-            external_contour_list = getattr(external_geom, "Contours", [])
-            if debug: print(f"  {len(external_contour_list)} external contours found")
-
-            for contour in external_contour_list:
-                z_val = round(contour[0]['z'], 2)
-                x_coords = []
-                y_coords = []
-                for point in contour:
-                    if hasattr(point, 'x'):
-                        x_coords.append(point.x)
-                        y_coords.append(-point.y)
-                    else:
-                        x_coords.append(point['x'])
-                        y_coords.append(-point['y'])
-                if x_coords and y_coords:
-                    if z_val not in external_contours:
-                        external_contours[z_val] = []
-                    external_contours[z_val].append({
-                        'x_coords': x_coords,
-                        'y_coords': y_coords
-                    })
-                    if debug: print(f"Added external contour for z={z_val}: {len(x_coords)} points")
-                else:
-                    if debug: print(f"WARNING: External contour for z={z_val} has empty coordinates!")
-            if debug: print(f"  External contours processed for {len(external_contours)} z-slices")
-            if debug:
-                for z, contours in external_contours.items():
-                    print(f"External z={z}: {len(contours)} contour(s)")
-    except Exception as e:
-        print(f"  Warning: Could not process External ROI '{plan_data.external}': {e}")
-        print("  Boundary checking will be disabled.")
-
     all_z_values = []
     for roi_obj in roi_data.values():
         all_z_values.extend(roi_obj.z_values)
@@ -292,9 +247,12 @@ def analysis(plan_data, roi_data):
     z_differences = [round(a - b, 2) for a, b in zip(ordered_z_values[1:], ordered_z_values[:-1])]
     slice_thickness = min([diff for diff in z_differences if diff != 0]) if z_differences else 0
 
+    min_z = min(all_z_values)
+    max_z = max(all_z_values)
+
     print(f"\nGlobal Analysis:")
     print(f"Slice thickness: {slice_thickness} mm")
-    print(f"Z-range: {min(all_z_values):.1f} to {max(all_z_values):.1f} mm")
+    print(f"Z-range: {min_z:.1f} to {max_z:.1f} mm")
 
     for roi_name, roi_obj in roi_data.items():
         if debug: print(f"\n{roi_name} Analysis:")
@@ -340,6 +298,55 @@ def analysis(plan_data, roi_data):
         roi_obj.min_area = min_area
         roi_obj.max_area = max_area
 
+    # --- Only collect external contours for relevant z-slices ---
+    if debug: print("Processing External ROI for boundary checking")
+    external_contours = {}
+    try:
+        external_roi_name = plan_data.external
+        if not external_roi_name or external_roi_name not in [roi.Name for roi in plan_data.roi_list]:
+            print(f"WARNING: External ROI '{external_roi_name}' not found in case. External contours will not be shown.")
+        else:
+            if debug: print(f"\nProcessing External ROI: {external_roi_name}")
+            external_geom = plan_data.case.PatientModel.\
+                    StructureSets[plan_data.exam.Name].\
+                    RoiGeometries[external_roi_name]. \
+                    PrimaryShape
+
+            external_contour_list = getattr(external_geom, "Contours", [])
+            if debug: print(f"  {len(external_contour_list)} external contours found")
+
+            # Only keep contours within min_z to max_z (inclusive, with tolerance)
+            z_tolerance = slice_thickness / 2 if slice_thickness else 0.1
+            for contour in external_contour_list:
+                z_val = round(contour[0]['z'], 2)
+                if (min_z - z_tolerance) <= z_val <= (max_z + z_tolerance):
+                    x_coords = []
+                    y_coords = []
+                    for point in contour:
+                        if hasattr(point, 'x'):
+                            x_coords.append(point.x)
+                            y_coords.append(-point.y)
+                        else:
+                            x_coords.append(point['x'])
+                            y_coords.append(-point['y'])
+                    if x_coords and y_coords:
+                        if z_val not in external_contours:
+                            external_contours[z_val] = []
+                        external_contours[z_val].append({
+                            'x_coords': x_coords,
+                            'y_coords': y_coords
+                        })
+                        if debug: print(f"Added external contour for z={z_val}: {len(x_coords)} points")
+                    else:
+                        if debug: print(f"WARNING: External contour for z={z_val} has empty coordinates!")
+            if debug: print(f"  External contours processed for {len(external_contours)} z-slices")
+            if debug:
+                for z, contours in external_contours.items():
+                    print(f"External z={z}: {len(contours)} contour(s)")
+    except Exception as e:
+        print(f"  Warning: Could not process External ROI '{plan_data.external}': {e}")
+        print("  Boundary checking will be disabled.")
+
     # Return external_contours and slice_thickness for GUI
     return external_contours, slice_thickness, all_z_values
 
@@ -373,8 +380,8 @@ def create_gui(roi_data, external_contours, slice_thickness, all_z_values):
     
     if debug: print("Creating matplotlib figure")
     fig = plt.figure(figsize=(16, 10))
-    if debug: print("Creating gridspec for subplots")
-    gs = fig.add_gridspec(3, num_rois, height_ratios=[1, 0.67, 1])
+    # Increase vertical space between rows and add hspace
+    gs = fig.add_gridspec(3, num_rois, height_ratios=[1.2, 0.8, 1.2], hspace=0.5)
     
     if debug: print("Calculating global z-range")
     min_z = min(all_z_values)
@@ -654,7 +661,6 @@ def create_gui(roi_data, external_contours, slice_thickness, all_z_values):
             contours_with_violations = set()
             for contour in processed_contours:
                 if contour.get('outside_external', False) and not contour.get('is_external', False):
-                    # Use area as a simple way to group segments from the same original contour
                     contours_with_violations.add(contour['area'])
             external_violations = len(contours_with_violations)
             
@@ -920,27 +926,41 @@ def create_gui(roi_data, external_contours, slice_thickness, all_z_values):
             'has_external_violations': external_violations
         }
 
-    # For each ROI, create its own error detection banner above its plots
-    for roi_idx, roi_name in enumerate(valid_roi_names):
-        issues = roi_issue_info[roi_name]
-        if issues['has_multiple_contours'] or issues['has_isolated_contours'] or issues['has_missing_contours'] or issues['has_external_violations']:
-            error_text = f"⚠️ {roi_name}: Possible Errant Contours Detected"
-            details = []
+    # --- Consolidated error banner ---
+    # Check if any ROI has issues
+    any_issues = any(
+        issues['has_multiple_contours'] or
+        issues['has_isolated_contours'] or
+        issues['has_missing_contours'] or
+        issues['has_external_violations']
+        for issues in roi_issue_info.values()
+    )
+    if any_issues:
+        error_text = "⚠️ Possible Errant Contours Detected"
+        details = []
+        for roi_name, issues in roi_issue_info.items():
+            roi_details = []
             if issues['has_missing_contours']:
-                details.append("Gaps found")
+                roi_details.append("gaps")
             if issues['has_isolated_contours']:
-                details.append("Isolated contours (orange)")
+                roi_details.append("isolated (orange)")
             if issues['has_multiple_contours']:
-                details.append("Multiple contours per slice (red)")
+                roi_details.append("multiple per slice (red)")
             if issues['has_external_violations']:
-                details.append("Contours outside External (red)")
-            if details:
-                error_text += f" ({', '.join(details)})"
-            error_frame = tk.Frame(scrollable_frame, bg=config.error_banner_color, relief=tk.RAISED, bd=2)
-            error_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(5, 5))
-            error_label = tk.Label(error_frame, text=error_text, bg=config.error_banner_color, fg=config.error_banner_fg, 
-                                  font=config.font_error_banner)
-            error_label.pack(pady=5)
+                roi_details.append("outside External (red)")
+            if roi_details:
+                details.append(f"{roi_name}: {', '.join(roi_details)}")
+        if details:
+            error_text += " (" + "; ".join(details) + ")"
+        error_frame = tk.Frame(scrollable_frame, bg=config.error_banner_color, relief=tk.RAISED, bd=2)
+        error_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(15, 10))  # Increased vertical padding
+        error_label = tk.Label(error_frame, text=error_text, bg=config.error_banner_color, fg=config.error_banner_fg, 
+                              font=config.font_error_banner)
+        error_label.pack(pady=8)  # Increased padding inside banner
+    # --- End consolidated banner ---
+
+    # Remove per-ROI error banners
+    # ...existing code...
 
     if debug: print("Packing canvas widget")
     canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(5, 5))
@@ -952,7 +972,7 @@ def create_gui(roi_data, external_contours, slice_thickness, all_z_values):
     
     if debug: print("Creating statistics frame")
     stats_frame = tk.Frame(scrollable_frame, bg=config.gui_bg_color, relief=tk.RAISED, bd=2)
-    stats_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=5)
+    stats_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=(10, 15))  # Increased vertical padding
     for roi_idx, roi_name in enumerate(valid_roi_names):
         if roi_name in roi_data:
             data = roi_data[roi_name]

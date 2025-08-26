@@ -1,5 +1,5 @@
 # General debug flag
-debug = True
+debug = False
 
 # Name of the External ROI (used for boundary checking)
 ExternalName = "External"
