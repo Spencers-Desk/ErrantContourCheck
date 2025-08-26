@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import tkinter as tk
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from collections import Counter
+import sys
 
 # Import split_contour_by_external from utils
 from utils import split_contour_by_external
@@ -102,7 +103,7 @@ def get_roi_selection(plan_data):
     # Create selection window
     root = tk.Tk()
     root.title("Select ROIs for Contour Analysis")
-    root.geometry("500x400")
+    root.geometry(config.roi_selection_gui_size)
     root.resizable(False, False)
 
     # Variables to store selections
@@ -114,17 +115,17 @@ def get_roi_selection(plan_data):
 
     # Title
     title_label = tk.Label(main_frame, text="Multi-ROI Contour Analysis", 
-                          font=('Arial', 16, 'bold'))
+                          font=config.font_title)
     title_label.pack(pady=(0, 20))
 
     # Instructions
     instr_label = tk.Label(main_frame, 
                           text="Select 1-4 Target ROIs to analyze for errant contours:",
-                          font=('Arial', 10))
+                          font=config.font_label)
     instr_label.pack(pady=(0, 15))
 
     # ROI selection frame
-    roi_frame = tk.LabelFrame(main_frame, text="Target ROIs", font=('Arial', 10, 'bold'))
+    roi_frame = tk.LabelFrame(main_frame, text="Target ROIs", font=config.font_label)
     roi_frame.pack(fill=tk.X, pady=(0, 15))
 
     # Create 4 Combobox widgets for ROI selection
@@ -176,7 +177,7 @@ def get_roi_selection(plan_data):
 
     # Summary info
     info_text = f"Available Target ROIs: {len(viable_rois)}\n"
-    info_label = tk.Label(main_frame, text=info_text, font=('Arial', 9), 
+    info_label = tk.Label(main_frame, text=info_text, font=config.font_stats, 
                          fg='gray', justify=tk.LEFT)
     info_label.pack(side=tk.BOTTOM, anchor='w', pady=(10, 0))
 
@@ -331,16 +332,17 @@ def create_gui(roi_data, external_contours, slice_thickness, all_z_values):
     if debug: print("Creating Tk root window")
     root = tk.Tk()
     roi_names_str = ", ".join(roi_data.keys())
-    if debug: print(f"Setting window title: Multi-ROI Contour Analysis - {roi_names_str}")
     root.title(f"Multi-ROI Contour Analysis - {roi_names_str}")
-    if debug: print("Setting window geometry")
-    root.geometry("1600x1000")
-    
-    # ADD THIS HANDLER TO ENSURE MAINLOOP EXITS ON WINDOW CLOSE
+    root.geometry(config.analysis_gui_size)
+    root.configure(bg=config.gui_bg_color)
+
+    # Ensure the script exits when the window is closed (X button)
     def on_window_close():
         if debug: print("Window close event triggered")
         root.quit()
         root.destroy()
+        sys.exit()
+
     root.protocol("WM_DELETE_WINDOW", on_window_close)
 
     if debug: print("Filtering valid_roi_names")
@@ -474,16 +476,14 @@ def create_gui(roi_data, external_contours, slice_thickness, all_z_values):
         if contour_areas:
             # Create histogram
             max_area = max(contour_areas)
-            bins = range(0, int(max_area) + 2, 1)
-            
+            bins = range(0, int(max_area) + 2, config.area_histogram_bin_size)
             n, bins_used, patches = ax.hist(contour_areas, bins=bins, 
                      alpha=0.7, color='lightgreen',
                      edgecolor='darkgreen', linewidth=0.5)
-            
-            # Color bars red for areas < 2mm²
+            # Color bars red for areas < config.contour_area_threshold
             for i, patch in enumerate(patches):
-                if bins_used[i] < 2:
-                    patch.set_color('red')
+                if bins_used[i] < config.contour_area_threshold:
+                    patch.set_color(config.color_small)
                     patch.set_alpha(0.8)
         
         # Set up axes for this subplot
@@ -564,10 +564,11 @@ def create_gui(roi_data, external_contours, slice_thickness, all_z_values):
                 for point in contour:
                     if hasattr(point, 'x'):
                         x_coords.append(point.x)
-                        y_coords.append(-point.y)  # Flip y-coordinate to match RayStation orientation
+                        # Flip y if config.flip_y_coords
+                        y_coords.append(-point.y if config.flip_y_coords else point.y)
                     else:
                         x_coords.append(point['x'])
-                        y_coords.append(-point['y'])  # Flip y-coordinate to match RayStation orientation
+                        y_coords.append(-point['y'] if config.flip_y_coords else point['y'])
                 
                 # Close the contour
                 if x_coords and y_coords:
@@ -621,7 +622,7 @@ def create_gui(roi_data, external_contours, slice_thickness, all_z_values):
                     'area': 0,  # External contour doesn't count as ROI area
                     'segment_type': 'external',
                     'outside_external': False,
-                    'color': 'gray',
+                    'color': config.color_external,
                     'alpha': 0.5,
                     'is_external': True  # Flag to identify external contours
                 })
@@ -663,23 +664,19 @@ def create_gui(roi_data, external_contours, slice_thickness, all_z_values):
         
         # Set up axis limits and properties once (for consistency and speed)
         if all_x_coords and all_y_coords:
-            margin = 5  # mm margin
+            margin = config.plot_margin_mm
             ax.set_xlim(min(all_x_coords) - margin, max(all_x_coords) + margin)
             ax.set_ylim(min(all_y_coords) - margin, max(all_y_coords) + margin)
         
         # Set up axis properties
         ax.set_aspect('equal')
         ax.grid(True, alpha=0.3)
-        
-        # Remove x and y axes for cleaner display
         ax.set_xticks([])
         ax.set_yticks([])
         ax.set_xlabel('')
         ax.set_ylabel('')
-        
-        # Set title above the plot (not inside)
-        ax.set_title('', fontsize=9)  # Will be updated by update_slice_display
-        
+        ax.set_title('', fontsize=9)
+
         # Pre-allocate matplotlib artists for ALL slices (hide/show approach)
         # This is more efficient than updating artist data - we just toggle visibility
         slice_artists[roi_name] = {
@@ -870,6 +867,7 @@ def create_gui(roi_data, external_contours, slice_thickness, all_z_values):
     canvas.draw()
     
     if debug: print("Checking for error detection banner")
+    # Error detection banner
     if global_has_multiple_contours or global_has_isolated_contours or global_has_missing_contours or global_has_external_violations:
         if debug: print("Displaying error detection banner")
         # Add error detection banner at the top if issues found
@@ -883,17 +881,14 @@ def create_gui(roi_data, external_contours, slice_thickness, all_z_values):
             details.append("Multiple contours per slice (red)")
         if global_has_external_violations:
             details.append("Contours outside External (red)")
-        
         if details:
             error_text += f" ({', '.join(details)})"
-        
-        error_frame = tk.Frame(scrollable_frame, bg='red', relief=tk.RAISED, bd=2)
+        error_frame = tk.Frame(scrollable_frame, bg=config.error_banner_color, relief=tk.RAISED, bd=2)
         error_frame.pack(side=tk.TOP, fill=tk.X, padx=10, pady=(5, 5))
-        
-        error_label = tk.Label(error_frame, text=error_text, bg='red', fg='white', 
-                              font=('Arial', 12, 'bold'))
+        error_label = tk.Label(error_frame, text=error_text, bg=config.error_banner_color, fg=config.error_banner_fg, 
+                              font=config.font_error_banner)
         error_label.pack(pady=5)
-    
+
     if debug: print("Packing canvas widget")
     canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True, pady=(5, 5))
     
@@ -903,11 +898,10 @@ def create_gui(roi_data, external_contours, slice_thickness, all_z_values):
     canvas.get_tk_widget().focus_set()
     
     if debug: print("Creating statistics frame")
-    stats_frame = tk.Frame(scrollable_frame, bg='wheat', relief=tk.RAISED, bd=2)
+    stats_frame = tk.Frame(scrollable_frame, bg=config.gui_bg_color, relief=tk.RAISED, bd=2)
     stats_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=5)
     for roi_idx, roi_name in enumerate(valid_roi_names):
         if roi_name in roi_data:
-            if debug: print(f"Adding stats for {roi_name}")
             data = roi_data[roi_name]
             stats_text = f"{roi_name}: {data.number_of_contours} contours | "
             stats_text += f"{data.gaps} gaps | "
@@ -915,24 +909,22 @@ def create_gui(roi_data, external_contours, slice_thickness, all_z_values):
             stats_text += f"Avg Area: {data.avg_area:.0f}mm² | "
             stats_text += f"Min: {data.min_area:.0f}mm² | "
             stats_text += f"Max: {data.max_area:.0f}mm²"
-            
-            stats_label = tk.Label(stats_frame, text=stats_text, bg='wheat', font=('Arial', 9))
+            stats_label = tk.Label(stats_frame, text=stats_text, bg=config.gui_bg_color, font=config.font_stats)
             stats_label.pack(pady=2)
-    
-    # Add slice thickness info and navigation instructions
+
     slice_info = tk.Label(stats_frame, text=f"Slice Thickness: {slice_thickness}mm", 
-                         bg='wheat', font=('Arial', 9, 'bold'))
+                         bg=config.gui_bg_color, font=config.font_stats)
     slice_info.pack(pady=2)
-    
-    # Add navigation instructions
+
     nav_info = tk.Label(stats_frame, 
                        text="Slice Navigation: Left Click = Next | Right Click = Previous | Arrow Keys = Navigate All ROIs", 
-                       bg='wheat', font=('Arial', 8, 'italic'))
+                       bg=config.gui_bg_color, font=config.font_nav_info)
     nav_info.pack(pady=1)
-    
+
     if debug: print("About to start GUI mainloop")
     root.mainloop()
     if debug: print("Exited GUI mainloop")
+    sys.exit()
     if debug: print("Exiting create_gui")
 
 def main():
