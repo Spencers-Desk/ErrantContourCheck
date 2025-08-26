@@ -237,43 +237,47 @@ def analysis(plan_data, roi_data):
     if debug: print("Processing External ROI for boundary checking")
     external_contours = {}
     try:
-        if plan_data.external:
-            if debug: print(f"\nProcessing External ROI: {plan_data.external}")
+        external_roi_name = plan_data.external
+        if not external_roi_name or external_roi_name not in [roi.Name for roi in plan_data.roi_list]:
+            print(f"WARNING: External ROI '{external_roi_name}' not found in case. External contours will not be shown.")
+        else:
+            if debug: print(f"\nProcessing External ROI: {external_roi_name}")
             external_geom = plan_data.case.PatientModel.\
                     StructureSets[plan_data.exam.Name].\
-                    RoiGeometries[plan_data.external]. \
+                    RoiGeometries[external_roi_name]. \
                     PrimaryShape
 
-            external_contour_list = external_geom.Contours
+            external_contour_list = getattr(external_geom, "Contours", [])
             if debug: print(f"  {len(external_contour_list)} external contours found")
-
-            target_z_values = set()
-            for roi_obj in roi_data.values():
-                target_z_values.update(roi_obj.z_values)
 
             for contour in external_contour_list:
                 z_val = round(contour[0]['z'], 2)
-                if z_val in target_z_values:
-                    x_coords = []
-                    y_coords = []
-                    for point in contour:
-                        if hasattr(point, 'x'):
-                            x_coords.append(point.x)
-                            y_coords.append(-point.y)
-                        else:
-                            x_coords.append(point['x'])
-                            y_coords.append(-point['y'])
-                    if x_coords and y_coords:
-                        if z_val not in external_contours:
-                            external_contours[z_val] = []
-                        external_contours[z_val].append({
-                            'x_coords': x_coords,
-                            'y_coords': y_coords
-                        })
-            if debug: print(f"  External contours processed for {len(external_contours)} relevant z-slices")
+                x_coords = []
+                y_coords = []
+                for point in contour:
+                    if hasattr(point, 'x'):
+                        x_coords.append(point.x)
+                        y_coords.append(-point.y)
+                    else:
+                        x_coords.append(point['x'])
+                        y_coords.append(-point['y'])
+                if x_coords and y_coords:
+                    if z_val not in external_contours:
+                        external_contours[z_val] = []
+                    external_contours[z_val].append({
+                        'x_coords': x_coords,
+                        'y_coords': y_coords
+                    })
+                    if debug: print(f"Added external contour for z={z_val}: {len(x_coords)} points")
+                else:
+                    if debug: print(f"WARNING: External contour for z={z_val} has empty coordinates!")
+            if debug: print(f"  External contours processed for {len(external_contours)} z-slices")
+            if debug:
+                for z, contours in external_contours.items():
+                    print(f"External z={z}: {len(contours)} contour(s)")
     except Exception as e:
-        if debug: print(f"  Warning: Could not process External ROI '{plan_data.external}': {e}")
-        if debug: print("  Boundary checking will be disabled.")
+        print(f"  Warning: Could not process External ROI '{plan_data.external}': {e}")
+        print("  Boundary checking will be disabled.")
 
     all_z_values = []
     for roi_obj in roi_data.values():
@@ -606,7 +610,10 @@ def create_gui(roi_data, external_contours, slice_thickness, all_z_values):
             
             # Add external contour outlines for visual reference (don't scale to them)
             external_contours_at_z = external_contours.get(z_slice, [])
+            if debug: print(f"Slice {slice_idx} z={z_slice}: {len(external_contours_at_z)} external contour(s)")
             for ext_contour in external_contours_at_z:
+                if not ext_contour['x_coords'] or not ext_contour['y_coords']:
+                    if debug: print(f"WARNING: External contour for z={z_slice} is empty!")
                 # Add external contour as a reference (gray line, no fill)
                 processed_contours.append({
                     'x_coords': ext_contour['x_coords'] + [ext_contour['x_coords'][0]],  # Close contour
