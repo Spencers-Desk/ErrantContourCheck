@@ -12,6 +12,40 @@ ErrantContourCheck analyzes multiple Regions of Interest (ROIs) simultaneously t
 - **Isolated Contours**: Contours separated from neighbors by >1× slice thickness
 - **Boundary Violations**: Contours abutting or extending beyond the External ROI
 
+## Example: Multi-ROI Contour Analysis Workflow
+
+### 1. Example Contour Images
+
+#### Abutting Skin
+This is an example of a contour abutting the external. It's also _voxel based_ rather than _contour based_ as indicated by the changed name in the analysis plot.
+![Abutting Contour](images/abutting_contour.png)
+
+#### Ditzel
+This is an example of a contour with small _ditzels_ outside of it.
+![Ditzel Contour](images/ditzel_contour.png)
+
+#### Gap
+This is an example of a contour with a slice that wasn't contoured.
+![Gap Contour](images/gap_contour.png)
+
+#### Outside External
+This is an example of a cutout with a slice that has a contour outside of the external.
+![Outside Contour](images/outside_contour.png)
+
+### 2. ROI Selection GUI
+
+The user selects 1-4 target ROIs for analysis:
+
+![ROI Selection GUI](images/roi_selection_gui.png)
+
+### 3. Analysis & Visualization
+
+The analysis GUI displays contour statistics, error detection, and interactive slice viewers:
+
+![Analysis GUI](images/analysis_gui.png)
+
+
+
 ## File Structure
 
 ```
