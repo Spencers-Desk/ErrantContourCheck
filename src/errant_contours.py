@@ -1013,6 +1013,9 @@ def main():
 
     if debug: print(f"Selected ROIs: {selected_rois}")
 
+    # Track temp ROIs created during selection
+    temp_rois_to_delete = []
+
     for roi_name in selected_rois:
         # Try to find ROI object in ptv_list, then roi_list, else create dummy
         roi_obj = next((roi for roi in plan_data.ptv_list if roi.Name == roi_name), None)
@@ -1026,7 +1029,21 @@ def main():
             roi_obj.Name = roi_name
         roi_data[roi_name] = RoiData(roi_obj, plan_data)
 
+        # If the ROI is a temp ROI (created by ensure_roi_has_contours), add to delete list
+        if hasattr(plan_data, "temp_rois") and roi_name in plan_data.temp_rois:
+            temp_rois_to_delete.append(roi_name)
+
     external_contours, slice_thickness, all_z_values = analysis(plan_data, roi_data)
+
+    # --- Delete temp ROIs before showing GUI ---
+    if temp_rois_to_delete:
+        if debug: print(f"Deleting temporary ROIs: {temp_rois_to_delete}")
+        for temp_roi_name in temp_rois_to_delete:
+            try:
+                plan_data.case.PatientModel.RegionsOfInterest[temp_roi_name].DeleteRoi()
+                if debug: print(f"Deleted temp ROI: {temp_roi_name}")
+            except Exception as e:
+                print(f"Warning: Could not delete temp ROI '{temp_roi_name}': {e}")
 
     create_gui(roi_data, external_contours, slice_thickness, all_z_values)
 
