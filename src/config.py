@@ -5,13 +5,13 @@ debug = False
 ExternalName = "External"
 
 # Area threshold for flagging small contours (mm²)
-contour_area_threshold = 2  # Used for coloring small contours red
+contour_area_threshold = 1  # Used for coloring small contours red
 
 # Gap threshold (number of slice thicknesses to consider a gap)
 gap_threshold = 1
 
 # Isolation threshold (multiple of slice thickness to consider a contour isolated)
-isolation_threshold_factor = 2  # Used for orange bars
+isolation_threshold_factor = 1  # Used for orange bars
 
 # Maximum number of ROIs user can select in GUI
 max_roi_selection = 4

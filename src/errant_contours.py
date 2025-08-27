@@ -940,7 +940,8 @@ def create_gui(roi_data, external_contours, slice_thickness, all_z_values):
         details = []
         for roi_name, issues in roi_issue_info.items():
             roi_details = []
-            if issues['has_missing_contours']:
+            # Only show "gaps" if the actual gap count is > 0
+            if roi_name in roi_data and getattr(roi_data[roi_name], "gaps", 0) > 0:
                 roi_details.append("gaps")
             if issues['has_isolated_contours']:
                 roi_details.append("isolated (orange)")
